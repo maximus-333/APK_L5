@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <conio.h>
+#include <string.h>
 #include <stdlib.h>
 #include <dos.h>
 
@@ -46,120 +47,126 @@ void cmosUnlock()
 
 
 
-
-
-//get/set system time
+//get system time
 void opt1()
 {
 	timeStruct currTime;
+
+	//Lock timer, get time, unlock
+	cmosLock();
+
+	//Read the time
+	outp(0x70, 4);	//hours
+	currTime.hour = inp(0x71);
+	outp(0x70, 2);	//minutes
+	currTime.min = inp(0x71);
+	outp(0x70, 0);  //seconds
+	currTime.sec = inp(0x71);
+	//Now, unlock timer updates
+	cmosUnlock();
+
+	printf("Current time: %d:%d:%d\n", currTime.hour, currTime.min, currTime.sec);
+}
+
+void opt2()
+{
 	timeStruct newTime;
 
 	printf("Input new time - HH MM SS:");
 
 	scanf("%d %d %d", &newTime.hour, &newTime.min, &newTime.sec);
-	//got data. Lock timer, get time, put new time, unlock
+	//got data. Lock timer, put new time, unlock
 	cmosLock();
 
 	//Read/write the time
 	outp(0x70, 4);	//hours
-	currTime.hour = inp(0x71);
 	outp(0x71, newTime.hour);
 	outp(0x70, 2);	//minutes
-	currTime.min = inp(0x71);
 	outp(0x71, newTime.min);
 	outp(0x70, 0);	//seconds
-	currTime.sec = inp(0x71);
 	outp(0x71, newTime.sec);
 	//Now, unlock timer updates
 	cmosUnlock();
-
-	printf("Previous time: %d:%d:%d\n", currTime.hour, currTime.min, currTime.sec);
-
-
 }
 
-int delayValue = 0;
-void interrupt (*defTimerInt)(...); //default interrupt for timer
-void interrupt newTimerInt(...)     //new interrupt, with delay
+
+int counterDelay;
+void interrupt (*oldDelayInt)(...);
+void interrupt newDelayInt(...)
 {
-   _disable();
-
-   --delayValue;
-   defTimerInt();
-
-   _enable();
+   counterDelay--;
+   oldDelayInt();
 }
-
 
 //Delay, precise to millisecond
-void opt2()
+void opt3()
 {
+	int delayTempVal;
 	//User input and such
 	printf("Input delay in ms:");
-	scanf("%d", &delayValue);
+	scanf("%d", &delayTempVal);
 
 
 	//---Technical part---
 
 	_disable();
 
-	defTimerInt = getvect(0x70);  //get old RTC interrupt vector(IRQ8)
-	setvect(0x70, newTimerInt);   //set new vector, with delay added
+	oldDelayInt = getvect(0x70);
+	setvect(0x70, newDelayInt);
+
+	_enable();
+
+	//Unmask IRQ8 interrupt
+	//(IRQ8 is on slave, and its mask register is on address 0xA1)
+	outp(0xA1, (inp(0xA1) & 0xFE));
 
 	//activate periodic interrupt mode on CMOS
 	outp(0x70, 0x0B);
 	outp(0x71, inp(0x71) | 0x40);	//set periodic mode
 
+	counterDelay = delayTempVal;
 
-	//prepared for interrupt. Delay time was set earlier.
-	_enable();
+	printf("Wait begin \n");
+
 
 	//Just wait untill the delay completes
-	while(delayValue >= 0);
+	while(counterDelay >= 0);
+
+	printf("Wait end \n");
+
 
 	_disable();
 	//Finished waiting. Deactivate periodic interrupts
-	//and reset IRQ8
 	outp(0x70, 0x0B);
 	outp(0x71, inp(0x71) & 0xBF);
-	setvect(0x70, defTimerInt);
+
+	setvect(0x70, oldDelayInt);
 
 	_enable();
 }
 
 
-void interrupt (*alarmOld)(...);
-void interrupt alarmNew(...)
+void interrupt (*oldAlarmInt)(...);
+void interrupt newAlarmInt(...)
 {
-   _disable();
+   short far *screen = (short far*)MK_FP(0xB800, 0);
 
+   char alarmStr[] = "Alarm triggered!";
 
-   printf("ALARM TRIGGERED!\n");
+   int i;
+   for(i = 0;i<strlen(alarmStr);i++)
+   {
+      *screen = 0x1E00;
+      *screen |= (char)alarmStr[i];
+      screen ++;
+   }
 
-   //alarmOld();
-
-   printf("P1\n");
-
-   //Reset all back to default
-   cmosLock();
-
-   printf("P2\n");
-
-   //Unset alarm clock mode
    outp(0x70, 0x0B);
    outp(0x71, inp(0x71) & 0xDF);
-   //Go back to default interrupt
-   setvect(0x70, alarmOld);
-   cmosUnlock();
-
-   printf("P3\n");
-
-   _enable();
 }
 
 
-
-void opt3()
+void opt4()
 {
 	//Algorythm:
 	//Set alarm clock interrupt (IRQ8 - 0x70) to something
@@ -194,11 +201,13 @@ void opt3()
 	//set alarm clock mode
 	outp(0x70, 0xB);
 	outp(0x71, inp(0x71) | 0x20);
-	//Assign new handler
-	alarmOld = getvect(0x70);
-	setvect(0x70, alarmNew);
+
+	oldAlarmInt = getvect(0x4A);
+	setvect(0x4a, newAlarmInt);
 
 	cmosUnlock();
+
+	outp(0xA1, inp(0xA1) & 0xFE);
 
 	_enable();
 
@@ -213,33 +222,21 @@ int main()
 {
 	_disable();
 
-	//Initialize interrupt controllers(ICW1-ICW4)
-	//master
-   //	outp(0x20, 0x11);
-   //	outp(0x21, 0x08);
-   //	outp(0x21, 0x04);
-   //	outp(0x21, 0x01);
-	//slave
-   //	outp(0xA0, 0x11);
-   //	outp(0xA1, 0x70);
-   //	outp(0xA1, 0x02);
-   //	outp(0xA1, 0x01);
-
-	//Unmask IRQ8 interrupt
-	//(IRQ8 is on slave, and its mask register is on address 0xA1)
-	outp(0xA1, (inp(0xA1) & 0xFE));
-
 	//Change CMOS time to pure binary(from BCD)
 	outp(0x70, 0x0B);
 	outp(0x71, inp(0x71) | 0x04);
-
 
 	_enable();
 
 	while(1)
 	{
 		int option;
-		printf("Input option(1-3): ");
+		printf("Options: \n");
+		printf("1 - get time \n");
+		printf("2 - set time \n");
+		printf("3 - make delay \n");
+		printf("4 - set alarm\n");
+		printf("Input option(1-4): ");
 		scanf("%d", &option);
 
 		switch(option)
@@ -262,6 +259,13 @@ int main()
 
 				break;
 			}
+			case(4):
+			{
+				opt4();
+
+				break;
+			}
+
 			default:
 			{
 				return 0;
